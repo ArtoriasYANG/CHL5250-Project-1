@@ -1,0 +1,1780 @@
+---
+title: "CHL5250 Report"
+author: "Hanghuan Yang"
+date: "2024-02-19"
+output: html_document
+---
+
+```{r}
+# Load all the required packages
+setwd('/Users/artoriasyang/Desktop/Study/UofT biostats/CHL5250')
+library(truncnorm)
+library(mvtnorm)
+library(lme4)
+library(lmerTest)
+library(dplyr)
+library(tidyr)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(e1071)
+```
+
+Create the Original Dataset
+
+```{r}
+set.seed(100)
+c <- rbinom(n=1000,size=1,prob=0.2)
+# simulate our x
+x <- 5 + rnorm(1000, mean = 5, sd = 1) + 0.5*c
+# To simplify the calculation, round X to 3 decimal places.
+x <- round(x, 3)
+# create y based on x and c
+y_0 <- 1 + x + 3*c + rnorm(1000, mean = 0, sd = 5)
+```
+
+```{r}
+set.seed(101)
+individual_slope <- rnorm(1000, mean = 0, sd = 2)
+y_1 <- y_0 + rnorm(1000, mean = 3, sd = 3) + individual_slope
+y_2 <- y_1 + rnorm(1000, mean = 3, sd = 3) + individual_slope
+y_3 <- y_2 + rnorm(1000, mean = 3, sd = 3) + individual_slope
+
+df_y <- data.frame(y_0, y_1, y_2, y_3)
+df_y <- df_y %>%
+  pivot_longer(y_0:y_3, names_to="time",
+               values_to="y")
+# Create a subset contains subject, time and Y 
+df_y <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y)
+df_y <- select(df_y,-c(time))
+colnames(df_y) <- c('subject', 'time', 'y')
+df_rest <- data.frame(c(1:1000), x, c)
+colnames(df_rest) <- c('subject', 'x', 'c')
+# Merge these two subset into a final dataset
+df_og <- merge(x = df_y, y = df_rest, 
+             by = "subject", all.x=TRUE)
+# Convert numerical variables into categorical variables
+# Here, I think it is unnecessary to make convert outcome and confounder to be 
+# categorical since there is basically 0 and 1 in these 2 columns.
+df_og$subject = factor(df_og$subject)
+```
+
+Check Correlations between Parameters
+
+```{r}
+corr_mat <- round(cor(df_og[,-1]),2)
+ 
+# reduce the size of correlation matrix
+melted_corr_mat <- melt(corr_mat)
+head(melted_corr_mat)
+ 
+# plotting the correlation heatmap
+ggplot(data = melted_corr_mat, aes(x=Var1, y=Var2, 
+                                   fill=value)) + 
+geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Pearson\nCorrelation")+
+geom_text(aes(Var2, Var1, label = value), 
+          color = "black", size = 4) 
+```
+GLM
+```{r}
+lm.full = glm(y ~ x + time + c, data = df_og)
+summary(lm.full)
+predictions <- predict(lm.full, type = "response")
+mean((df_og$y - predictions)^2)
+```
+
+GLMER
+```{r}
+lm.full <- lmer(y ~ x + c + time + (time|subject), data=df_og)
+summary(lm.full)
+predictions <- predict(lm.full, type = "response")
+mean((df_og$y - predictions)^2)
+```
+
+Random Forest
+```{r}
+model_rf <- randomForest(y ~ x + c + time, ntree = 300, mtry = 3, nodesize = 1, 
+                         data = df_og, method = "anova")
+
+predictions_rf <- predict(model_rf, newdata = df_og)
+mse_rf <- mean((df_og$y - predictions_rf)^2)
+mse_rf
+```
+
+Decision Tree
+```{r}
+model_dt <- rpart(y ~ x + c + time, data = df_og, method = "anova",cp = 0.001, 
+                  minsplit = 30, minbucket = 20, maxdepth = 30)
+predictions_dt <- predict(model_dt, newdata = df_og)
+mse_dt <- mean((df_og$y - predictions_dt)^2)
+mse_dt
+```
+
+SVM
+```{r}
+model_svm <- svm(y ~ x + c + time, data = df_og, method = "C-classification", kernel = "radial")
+predictions_svm <- predict(model_svm, newdata = df_og)
+mse_svm <- mean((df_og$y - predictions_svm)^2)
+mse_svm
+```
+
+Give some insights for the original dataset
+```{r}
+library(ggplot2)
+ggplot(df_og, aes(x = x, y = y)) +
+  geom_point(color = "lightblue", shape = 19) +  
+  geom_smooth(method = "lm", se = TRUE, linetype = "dashed", color = "black", size = 1) + 
+  labs(title = "Relationship between X and Y", x = "X", y = "Y") +  
+  theme_minimal() + 
+  theme(legend.position = "bottom") 
+```
+
+```{r}
+ggplot(df_og, aes(x = factor(c), y = y)) +  
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Boxplot for C and Y", x = "C", y = "Y") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(df_og, aes(x = factor(time), y = y)) +  
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Boxplot for Time and Y", x = "Time", y = "Y") +
+  theme_minimal()
+```
+
+Simulation 1 - Missing value related to the outcome 
+
+```{r}
+set.seed(102)
+num_to_select <- 100
+
+# Use the sample() function to randomly select values with probabilities
+selected_indices <- sample(seq_along(y_1), size = num_to_select, prob = boot::inv.logit(scale(y_1)), replace = FALSE)
+# Create a new column with NA and replace selected values
+y_1_indicident1 <- y_1
+y_1_indicident1[selected_indices] <- NA
+
+# Use the sample() function to randomly select values with probabilities
+selected_indices <- sample(seq_along(y_2), size = num_to_select, prob = boot::inv.logit(scale(y_2)), replace = FALSE)
+# Create a new column with NA and replace selected values
+y_2_indicident1 <- y_2
+y_2_indicident1[selected_indices] <- NA
+
+# Use the sample() function to randomly select values with probabilities
+selected_indices <- sample(seq_along(y_3), size = num_to_select, prob = boot::inv.logit(scale(y_3)), replace = FALSE)
+# Create a new column with NA and replace selected values
+y_3_indicident1 <- y_3
+y_3_indicident1[selected_indices] <- NA
+
+df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+df_y_1 <- df_y_1 %>%
+  pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+# Create a subset contains subject, time and Y 
+df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+df_y_1 <- select(df_y_1,-c(time))
+colnames(df_y_1) <- c('subject', 'time', 'y')
+
+# Merge these two subset into a final dataset
+df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+# Convert numerical variables into categorical variables
+# Here, I think it is unnecessary to make convert outcome and confounder to be 
+# categorical since there is basically 0 and 1 in these 2 columns.
+df_1$subject = factor(df_og$subject)
+```
+
+```{r}
+lm.1 = glm(y ~ x + time + c, data = df_1)
+summary(lm.1)$coefficients[, "Pr(>|z|)"]['x']
+predictions <- predict(lm.1, newdata = df_og, type = "response")
+mean((df_og$y - predictions)^2)
+```
+
+GLM
+```{r}
+x_est_m1 <- NULL
+c_est_m1 <- NULL
+time_est_m1 <- NULL
+
+x_sig_m1 <- NULL
+c_sig_m1 <- NULL
+time_sig_m1 <- NULL
+
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 1000
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705769)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_1), size = num_to_select, prob = boot::inv.logit(scale(y_1)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_2), size = num_to_select, prob = boot::inv.logit(scale(y_2)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_3), size = num_to_select, prob = boot::inv.logit(scale(y_3)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_og$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- glm(y ~ x + c + time, data=df_1)
+	
+	# store the estimate for all predictors
+	x_est_m1[g] <- coef(mods_m1[[g]])["x"] 
+	c_est_m1[g] <- coef(mods_m1[[g]])["c"] 
+	time_est_m1[g] <- coef(mods_m1[[g]])["time"] 
+	
+	
+	x_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['x']
+  c_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['c']
+  time_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['time']
+  predictions <- predict(mods_m1[[g]], newdata = df_og, type = "response")
+  
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+}
+```
+
+```{r}
+mean(mse_list_m1)
+mean(x_est_m1)
+mean(c_est_m1)
+mean(time_est_m1)
+```
+GLMM
+```{r}
+x_est_m1 <- NULL
+c_est_m1 <- NULL
+time_est_m1 <- NULL
+
+x_sig_m1 <- NULL
+c_sig_m1 <- NULL
+time_sig_m1 <- NULL
+
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 1000
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705769)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_1), size = num_to_select, prob = boot::inv.logit(scale(y_1)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_2), size = num_to_select, prob = boot::inv.logit(scale(y_2)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_3), size = num_to_select, prob = boot::inv.logit(scale(y_3)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_og$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- lmer(y ~ x + c + time + (time|subject), data=df_1)
+	
+	# store the estimate for all predictors
+	x_est_m1[g] <- fixef(mods_m1[[g]])["x"] 
+	c_est_m1[g] <- fixef(mods_m1[[g]])["c"] 
+	time_est_m1[g] <- fixef(mods_m1[[g]])["time"] 
+	
+	
+	x_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['x']
+  c_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['c']
+  time_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['time']
+  predictions <- predict(mods_m1[[g]], newdata = df_og, type = "response")
+  
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+}
+```
+
+```{r}
+mean(mse_list_m1)
+mean(x_est_m1)
+mean(c_est_m1)
+mean(time_est_m1)
+```
+Random Forest 
+```{r}
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 100
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_1), size = num_to_select, prob = boot::inv.logit(scale(y_1)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_2), size = num_to_select, prob = boot::inv.logit(scale(y_2)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_3), size = num_to_select, prob = boot::inv.logit(scale(y_3)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- randomForest(y ~ x + c + time, ntree = 300, mtry = 3, nodesize = 1, 
+                         data = na.omit(df_1), method = "anova")
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+Decision Tree
+```{r}
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 100
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_1), size = num_to_select, prob = boot::inv.logit(scale(y_1)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_2), size = num_to_select, prob = boot::inv.logit(scale(y_2)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_3), size = num_to_select, prob = boot::inv.logit(scale(y_3)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- rpart(y ~ x + c + time, data = na.omit(df_1), method = "anova",cp = 0.001, 
+                  minsplit = 30, minbucket = 20, maxdepth = 30)
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse_dt <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse_dt)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+SVM
+```{r}
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 1000
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705769)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_1), size = num_to_select, prob = boot::inv.logit(scale(y_1)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_2), size = num_to_select, prob = boot::inv.logit(scale(y_2)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(y_3), size = num_to_select, prob = boot::inv.logit(scale(y_3)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- model_svm <- svm(y ~ x + c + time, data = na.omit(df_1), method = "C-classification", kernel = "radial")
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+Situation 2 missing value related to predictor x
+
+GLM
+```{r}
+x_est_m1 <- NULL
+c_est_m1 <- NULL
+time_est_m1 <- NULL
+
+x_sig_m1 <- NULL
+c_sig_m1 <- NULL
+time_sig_m1 <- NULL
+
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 1000
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_og$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- glm(y ~ x + c + time, data=df_1)
+	
+	# store the estimate for all predictors
+	x_est_m1[g] <- coef(mods_m1[[g]])["x"] 
+	c_est_m1[g] <- coef(mods_m1[[g]])["c"] 
+	time_est_m1[g] <- coef(mods_m1[[g]])["time"] 
+	
+	
+	x_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['x']
+  c_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['c']
+  time_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['time']
+  predictions <- predict(mods_m1[[g]], newdata = df_og, type = "response")
+  
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+}
+```
+
+```{r}
+mean(mse_list_m1)
+mean(x_est_m1)
+mean(c_est_m1)
+mean(time_est_m1)
+```
+
+GLMM
+```{r}
+x_est_m1 <- NULL
+c_est_m1 <- NULL
+time_est_m1 <- NULL
+
+x_sig_m1 <- NULL
+c_sig_m1 <- NULL
+time_sig_m1 <- NULL
+
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 1000
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_og$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- lmer(y ~ x + c + time + (time|subject), data=df_1)
+	
+	# store the estimate for all predictors
+	x_est_m1[g] <- fixef(mods_m1[[g]])["x"] 
+	c_est_m1[g] <- fixef(mods_m1[[g]])["c"] 
+	time_est_m1[g] <- fixef(mods_m1[[g]])["time"] 
+	
+	
+	x_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['x']
+  c_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['c']
+  time_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['time']
+  predictions <- predict(mods_m1[[g]], newdata = df_og, type = "response")
+  
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+mean(x_est_m1)
+mean(c_est_m1)
+mean(time_est_m1)
+```
+
+Random Forest 
+```{r}
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 10
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- randomForest(y ~ x + c + time, ntree = 300, mtry = 3, nodesize = 1, 
+                         data = na.omit(df_1), method = "anova")
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+Decision Tree
+```{r}
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 100
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- rpart(y ~ x + c + time, data = na.omit(df_1), method = "anova",cp = 0.001, 
+                  minsplit = 30, minbucket = 20, maxdepth = 30)
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse_dt <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse_dt)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+SVM
+```{r}
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 100
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(x), size = num_to_select, prob = boot::inv.logit(scale(x)), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- model_svm <- svm(y ~ x + c + time, data = na.omit(df_1), method = "C-classification", kernel = "radial")
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+Situation 3 - Missing value related to the confounder
+
+GLM
+```{r}
+x_est_m1 <- NULL
+c_est_m1 <- NULL
+time_est_m1 <- NULL
+
+x_sig_m1 <- NULL
+c_sig_m1 <- NULL
+time_sig_m1 <- NULL
+
+x_est_m2 <- NULL
+time_est_m2 <- NULL
+
+x_sig_m2 <- NULL
+time_sig_m2 <- NULL
+
+mse_list_m1 <- c()
+mse_list_m2 <- c()
+# store all the models in a list
+mods_m1 <- list()
+mods_m2 <- list()
+G = 1000
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_og$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- glm(y ~ x + c + time, data=df_1)
+	
+	# store the estimate for all predictors
+	x_est_m1[g] <- coef(mods_m1[[g]])["x"] 
+	c_est_m1[g] <- coef(mods_m1[[g]])["c"] 
+	time_est_m1[g] <- coef(mods_m1[[g]])["time"] 
+	
+	
+	x_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['x']
+  c_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['c']
+  time_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['time']
+  predictions <- predict(mods_m1[[g]], newdata = df_og, type = "response")
+  
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+  
+  # Without confounder
+  mods_m2[[g]] <- glm(y ~ x + time, data=df_1)
+	
+	# store the estimate for all predictors under unmeasured confounder
+	x_est_m2[g] <- coef(mods_m2[[g]])["x"] 
+	time_est_m2[g] <- coef(mods_m2[[g]])["time"] 
+	
+	
+	x_sig_m2[g] <- summary(mods_m2[[g]])$coefficients[, "Pr(>|t|)"]['x']
+  time_sig_m2[g] <- summary(mods_m2[[g]])$coefficients[, "Pr(>|t|)"]['time']
+  predictions_2 <- predict(mods_m2[[g]], newdata = df_og, type = "response")
+  
+  mse_2 <- mean((df_og$y - predictions_2)^2)
+  mse_list_m2 <- append(mse_list_m2, mse_2)
+  
+	# print(message) # to see progress
+}
+```
+
+```{r}
+mean(mse_list_m1)
+mean(x_est_m1)
+mean(c_est_m1)
+mean(time_est_m1)
+```
+
+```{r}
+mean(mse_list_m2)
+mean(x_est_m2)
+mean(time_est_m2)
+```
+
+
+
+GLMM
+```{r}
+x_est_m1 <- NULL
+c_est_m1 <- NULL
+time_est_m1 <- NULL
+
+x_sig_m1 <- NULL
+c_sig_m1 <- NULL
+time_sig_m1 <- NULL
+
+x_est_m2 <- NULL
+time_est_m2 <- NULL
+
+x_sig_m2 <- NULL
+time_sig_m2 <- NULL
+
+mse_list_m1 <- c()
+mse_list_m2 <- c()
+# store all the models in a list
+mods_m1 <- list()
+mods_m2 <- list()
+G = 1000
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705769)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_og$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- lmer(y ~ x + c + time + (time|subject), data=df_1)
+	
+	# store the estimate for all predictors
+	x_est_m1[g] <- fixef(mods_m1[[g]])["x"] 
+	c_est_m1[g] <- fixef(mods_m1[[g]])["c"] 
+	time_est_m1[g] <- fixef(mods_m1[[g]])["time"] 
+	
+	
+	x_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['x']
+  c_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['c']
+  time_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['time']
+  predictions <- predict(mods_m1[[g]], newdata = df_og, type = "response")
+  
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+  
+  # get the missing value model under the first situation without confounder
+	mods_m2[[g]] <- lmer(y ~ x + time + (time|subject), data=df_1)
+	
+	# store the estimate for all predictors
+	x_est_m2[g] <- fixef(mods_m2[[g]])["x"] 
+	time_est_m2[g] <- fixef(mods_m2[[g]])["time"] 
+	
+	
+	x_sig_m2[g] <- summary(mods_m2[[g]])$coefficients[, "Pr(>|t|)"]['x']
+  time_sig_m2[g] <- summary(mods_m2[[g]])$coefficients[, "Pr(>|t|)"]['time']
+  predictions_2 <- predict(mods_m2[[g]], newdata = df_og, type = "response")
+  
+  mse_2 <- mean((df_og$y - predictions_2)^2)
+  mse_list_m2 <- append(mse_list_m2, mse_2)
+  
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+mean(x_est_m1)
+mean(c_est_m1)
+mean(time_est_m1)
+```
+
+```{r}
+mean(mse_list_m2)
+mean(x_est_m2)
+mean(time_est_m2)
+```
+
+Random Forest 
+```{r}
+mse_list_m1 <- c()
+mse_list_m2 <- c()
+# store all the models in a list
+mods_m1 <- list()
+mods_m2 <- list()
+G = 10
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705769)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- randomForest(y ~ x + c + time, ntree = 300, mtry = 3, nodesize = 1, 
+                         data = na.omit(df_1), method = "anova")
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+  
+  # get the missing value model under the first situation without confounder 
+	mods_m2[[g]] <- randomForest(y ~ x + time, ntree = 300, mtry = 3, nodesize = 1, 
+                         data = na.omit(df_1), method = "anova")
+  predictions_2 <- predict(mods_m2[[g]], newdata = df_og)
+  mse_2 <- mean((df_og$y - predictions_2)^2)
+  mse_list_m2 <- append(mse_list_m2, mse_2)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+```{r}
+mean(mse_list_m2)
+```
+
+Decision Tree
+```{r}
+mse_list_m1 <- c()
+mse_list_m2 <- c()
+# store all the models in a list
+mods_m1 <- list()
+mods_m2 <- list()
+G = 100
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- rpart(y ~ x + c + time, data = na.omit(df_1), method = "anova",cp = 0.001, 
+                  minsplit = 30, minbucket = 20, maxdepth = 30)
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse_dt <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse_dt)
+  
+  # get the missing value model under the first situation without confounder
+	mods_m2[[g]] <- rpart(y ~ x + time, data = na.omit(df_1), method = "anova",cp = 0.001, 
+                  minsplit = 30, minbucket = 20, maxdepth = 30)
+  predictions_2 <- predict(mods_m2[[g]], newdata = df_og)
+  mse_dt_2 <- mean((df_og$y - predictions_2)^2)
+  mse_list_m2 <- append(mse_list_m2, mse_dt_2)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+```{r}
+mean(mse_list_m2)
+```
+
+SVM
+```{r}
+mse_list_m1 <- c()
+mse_list_m2 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+mods_m2 <- list()
+G = 100
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(seq_along(c), size = num_to_select, prob = ifelse(c == 0, 0.2, 0.8), replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- svm(y ~ x + c + time, data = na.omit(df_1), method = "C-classification", kernel = "radial")
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+  
+  # get the missing value model under the first situation without confoun
+	mods_m2[[g]] <- svm(y ~ x + time, data = na.omit(df_1), method = "C-classification", kernel = "radial")
+  predictions_2 <- predict(mods_m2[[g]], newdata = df_og)
+  mse_2 <- mean((df_og$y - predictions_2)^2)
+  mse_list_m2 <- append(mse_list_m2, mse_2)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+```{r}
+mean(mse_list_m2)
+```
+
+Situation 4 - Randomly scattered missing data
+GLM
+```{r}
+x_est_m1 <- NULL
+c_est_m1 <- NULL
+time_est_m1 <- NULL
+
+x_sig_m1 <- NULL
+c_sig_m1 <- NULL
+time_sig_m1 <- NULL
+
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 1000
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_og$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- glm(y ~ x + c + time, data=df_1)
+	
+	# store the estimate for all predictors
+	x_est_m1[g] <- coef(mods_m1[[g]])["x"] 
+	c_est_m1[g] <- coef(mods_m1[[g]])["c"] 
+	time_est_m1[g] <- coef(mods_m1[[g]])["time"] 
+	
+	
+	x_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['x']
+  c_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['c']
+  time_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['time']
+  predictions <- predict(mods_m1[[g]], newdata = df_og, type = "response")
+  
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+}
+```
+
+```{r}
+mean(mse_list_m1)
+mean(x_est_m1)
+mean(c_est_m1)
+mean(time_est_m1)
+```
+
+GLMM
+```{r}
+x_est_m1 <- NULL
+c_est_m1 <- NULL
+time_est_m1 <- NULL
+
+x_sig_m1 <- NULL
+c_sig_m1 <- NULL
+time_sig_m1 <- NULL
+
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 100
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_og$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- lmer(y ~ x + c + time + (time|subject), data=df_1)
+	
+	# store the estimate for all predictors
+	x_est_m1[g] <- fixef(mods_m1[[g]])["x"] 
+	c_est_m1[g] <- fixef(mods_m1[[g]])["c"] 
+	time_est_m1[g] <- fixef(mods_m1[[g]])["time"] 
+	
+	
+	x_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['x']
+  c_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['c']
+  time_sig_m1[g] <- summary(mods_m1[[g]])$coefficients[, "Pr(>|t|)"]['time']
+  predictions <- predict(mods_m1[[g]], newdata = df_og, type = "response")
+  print('make prediction')
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+mean(x_est_m1)
+mean(c_est_m1)
+mean(time_est_m1)
+```
+
+Random Forest 
+```{r}
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 100
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- randomForest(y ~ x + c + time, ntree = 300, mtry = 3, nodesize = 1, 
+                         data = na.omit(df_1), method = "anova")
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+Decision Tree
+```{r}
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 100
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705768)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- rpart(y ~ x + c + time, data = na.omit(df_1), method = "anova",cp = 0.001, 
+                  minsplit = 30, minbucket = 20, maxdepth = 30)
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse_dt <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse_dt)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+SVM
+```{r}
+mse_list_m1 <- c()
+
+# store all the models in a list
+mods_m1 <- list()
+G = 100
+
+# Remember to set the seed OUTSIDE the loop
+set.seed(1004705770)
+
+temp <- Sys.time() # for timing the run
+for(g in 1:G){
+	num_to_select <- 100
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_1_indicident1 <- y_1
+  y_1_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_2_indicident1 <- y_2
+  y_2_indicident1[selected_indices] <- NA
+  
+
+  # Use the sample() function to randomly select values with probabilities
+  selected_indices <- sample(1000, num_to_select, replace = FALSE)
+  # Create a new column with NA and replace selected values
+  y_3_indicident1 <- y_3
+  y_3_indicident1[selected_indices] <- NA
+
+  df_y_1 <- data.frame(y_0, y_1_indicident1, y_2_indicident1, y_3_indicident1)
+  df_y_1 <- df_y_1 %>%
+    pivot_longer(y_0:y_3_indicident1, names_to="time",
+               values_to="y")
+  # Create a subset contains subject, time and Y 
+  df_y_1 <- data.frame(rep(c(1:1000), each = 4), c(1:4), df_y_1)
+  df_y_1 <- select(df_y_1,-c(time))
+  colnames(df_y_1) <- c('subject', 'time', 'y')
+
+  # Merge these two subset into a final dataset
+  df_1 <- merge(x = df_y_1, y = df_rest, 
+             by = "subject", all.x=TRUE)
+
+  df_1$subject = factor(df_1$subject)
+  
+
+  # get the missing value model under the first situation
+	mods_m1[[g]] <- model_svm <- svm(y ~ x + c + time, data = na.omit(df_1), method = "C-classification", kernel = "radial")
+  predictions <- predict(mods_m1[[g]], newdata = df_og)
+  mse <- mean((df_og$y - predictions)^2)
+  mse_list_m1 <- append(mse_list_m1, mse)
+	# print(message) # to see progress
+  print(g)
+}
+```
+
+```{r}
+mean(mse_list_m1)
+```
+
+
+
+
+
+
+
